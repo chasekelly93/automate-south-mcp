@@ -128,7 +128,7 @@
       "position": [1820, 0],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const lead = $('Parse SerpAPI Results').first().json;\nconst claudeResponse = $input.first().json;\n\nlet flagged = [];\ntry {\n  const text = (claudeResponse.content && claudeResponse.content[0] && claudeResponse.content[0].text) || \"[]\";\n  const parsed = JSON.parse(text);\n  if (Array.isArray(parsed)) {\n    flagged = parsed\n      .filter((item) => item && typeof item.url === \"string\")\n      .slice(0, 5);\n  }\n} catch (err) {\n  // Filtering failed or returned something unparseable - degrade gracefully.\n  // Synthesis still runs on the search snippets alone.\n  flagged = [];\n}\n\nreturn [{\n  json: {\n    ...lead,\n    flaggedLinks: flagged,\n  },\n}];\n"
+        "jsCode": "const lead = $('Parse SerpAPI Results').first().json;\nconst claudeResponse = $input.first().json;\n\nlet flagged = [];\ntry {\n  // Claude may return a \"thinking\" block before the actual text block -\n  // find the text block by type rather than assuming content[0].\n  const textBlock = (claudeResponse.content || []).find((b) => b && b.type === \"text\");\n  const text = (textBlock && textBlock.text) || \"[]\";\n  const parsed = JSON.parse(text);\n  if (Array.isArray(parsed)) {\n    flagged = parsed\n      .filter((item) => item && typeof item.url === \"string\")\n      .slice(0, 5);\n  }\n} catch (err) {\n  // Filtering failed or returned something unparseable - degrade gracefully.\n  // Synthesis still runs on the search snippets alone.\n  flagged = [];\n}\n\nreturn [{\n  json: {\n    ...lead,\n    flaggedLinks: flagged,\n  },\n}];\n"
       }
     },
     {
@@ -219,7 +219,7 @@
       "position": [3120, 0],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const lead = $('Build Claude Synthesis Request').first().json;\nconst claudeResponse = $input.first().json;\n\nconst noteText = (claudeResponse.content && claudeResponse.content[0] && claudeResponse.content[0].text && claudeResponse.content[0].text.trim())\n  || \"Automated enrichment failed to produce a note for this lead \\u2014 manual research needed before the call.\";\n\nreturn [{\n  json: {\n    contactId: lead.contactId,\n    noteText,\n  },\n}];\n"
+        "jsCode": "const lead = $('Build Claude Synthesis Request').first().json;\nconst claudeResponse = $input.first().json;\n\n// Claude may return a \"thinking\" block before the actual text block -\n// find the text block by type rather than assuming content[0].\nconst textBlock = (claudeResponse.content || []).find((b) => b && b.type === \"text\");\nconst noteText = (textBlock && textBlock.text && textBlock.text.trim())\n  || \"Automated enrichment failed to produce a note for this lead \\u2014 manual research needed before the call.\";\n\nreturn [{\n  json: {\n    contactId: lead.contactId,\n    noteText,\n  },\n}];\n"
       }
     },
     {
