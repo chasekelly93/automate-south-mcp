@@ -1,0 +1,294 @@
+{
+  "name": "Lead Enrichment (GHL -> SerpAPI -> Claude -> GHL Note)",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "webhook-trigger",
+      "name": "Lead Enrichment Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "b6f1a6b2-3c9d-4a2e-9f4a-lead-enrichment",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-enrichment",
+        "responseMode": "onReceived",
+        "responseData": "noData",
+        "options": {}
+      }
+    },
+    {
+      "id": "gate-should-enrich",
+      "name": "Gate: Should Enrich?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const item = $input.first().json;\nconst body = item.body || item;\nconst rawTags = body.tags;\nlet tags = [];\nif (Array.isArray(rawTags)) {\n  tags = rawTags.map((t) => String(t).toLowerCase().trim());\n} else if (typeof rawTags === \"string\") {\n  tags = rawTags.split(\",\").map((t) => t.toLowerCase().trim());\n}\n\n// Toggle: the GHL workflow only adds this tag for shops/campaigns that\n// should get enrichment. No tag -> no note, no cost.\nif (!tags.includes(\"enrich-lead\")) {\n  return [];\n}\n\nreturn [{ json: body }];\n"
+      }
+    },
+    {
+      "id": "build-search-query",
+      "name": "Build Search Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $input.first().json;\n\nconst businessName = lead.businessName || lead.business_name || \"\";\nconst city = lead.city || \"\";\nconst state = lead.state || \"\";\nconst location = [city, state].filter(Boolean).join(\", \");\n\nif (!businessName) {\n  // Not enough to research - stop rather than post a note with nothing behind it.\n  return [];\n}\n\nconst searchQuery = `${businessName} ${location} auto body shop`.trim();\n\nreturn [{\n  json: {\n    ...lead,\n    location,\n    searchQuery,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "serpapi-search",
+      "name": "SerpAPI Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [780, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "engine", "value": "google" },
+            { "name": "q", "value": "={{ $json.searchQuery }}" },
+            { "name": "num", "value": "10" },
+            { "name": "api_key", "value": "={{ $env.SERPAPI_KEY }}" }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      }
+    },
+    {
+      "id": "parse-serpapi-results",
+      "name": "Parse SerpAPI Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $('Build Search Query').first().json;\nconst serp = $input.first().json;\n\nconst organic = serp.organic_results || [];\nconst local = (serp.local_results && serp.local_results.places) || [];\n\nconst results = [];\n\nfor (const r of local.slice(0, 5)) {\n  results.push({\n    title: r.title || \"\",\n    link: r.link || r.website || \"\",\n    snippet: [r.address, r.rating ? `Rating: ${r.rating} (${r.reviews || 0} reviews)` : \"\"]\n      .filter(Boolean)\n      .join(\" \\u2014 \"),\n  });\n}\n\nfor (const r of organic.slice(0, 10)) {\n  results.push({\n    title: r.title || \"\",\n    link: r.link || \"\",\n    snippet: r.snippet || \"\",\n  });\n}\n\nconst deduped = [];\nconst seen = new Set();\nfor (const r of results) {\n  if (!r.link || seen.has(r.link)) continue;\n  seen.add(r.link);\n  deduped.push(r);\n}\nconst top10 = deduped.slice(0, 10);\n\nconst numbered = top10\n  .map((r, i) => `${i + 1}. ${r.title}\\n   ${r.link}\\n   \"${r.snippet}\"`)\n  .join(\"\\n\\n\");\n\nreturn [{\n  json: {\n    ...lead,\n    searchResults: top10,\n    numberedSearchResults: numbered || \"No search results were returned.\",\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "build-claude-filter-request",
+      "name": "Build Claude Filter Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $input.first().json;\n\nconst userPrompt = [\n  `I'm researching a business for lead qualification before a sales call.`,\n  `Business name: ${lead.businessName || \"\"}`,\n  `Location (if known): ${lead.location || \"\"}`,\n  ``,\n  `Here are the top search results:`,\n  ``,\n  lead.numberedSearchResults,\n  ``,\n  `Which of these links are worth opening for the most valuable information about this business? Prioritize: official website, Google Business profile, LinkedIn company page, relevant local business directories. Skip: news articles, review sites, unrelated social media, aggregator sites with no unique info.`,\n  ``,\n  `Respond with a JSON array of the links worth opening, most valuable first. Each item must be {\"url\": \"...\", \"title\": \"...\"}. Include at most 5 items. If none are worth opening, respond with an empty array: []`,\n].join(\"\\n\");\n\nreturn [{\n  json: {\n    ...lead,\n    claudeRequestBody: {\n      model: \"claude-haiku-4-5-20251001\",\n      max_tokens: 600,\n      system: \"You are helping filter search results before a sales call. Respond ONLY with valid JSON. No prose, no markdown fences, no explanation outside the JSON.\",\n      messages: [{ role: \"user\", content: userPrompt }],\n    },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "claude-filter-links",
+      "name": "Claude - Filter Links",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.claudeRequestBody }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "parse-flagged-urls",
+      "name": "Parse Flagged URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1820, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $('Parse SerpAPI Results').first().json;\nconst claudeResponse = $input.first().json;\n\nlet flagged = [];\ntry {\n  const text = (claudeResponse.content && claudeResponse.content[0] && claudeResponse.content[0].text) || \"[]\";\n  const parsed = JSON.parse(text);\n  if (Array.isArray(parsed)) {\n    flagged = parsed\n      .filter((item) => item && typeof item.url === \"string\")\n      .slice(0, 5);\n  }\n} catch (err) {\n  // Filtering failed or returned something unparseable - degrade gracefully.\n  // Synthesis still runs on the search snippets alone.\n  flagged = [];\n}\n\nreturn [{\n  json: {\n    ...lead,\n    flaggedLinks: flagged,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "split-flagged-urls",
+      "name": "Split Flagged URLs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [2080, 0],
+      "parameters": {
+        "fieldToSplitOut": "flaggedLinks",
+        "include": "noOtherFields",
+        "options": {}
+      }
+    },
+    {
+      "id": "scrape-page",
+      "name": "Scrape Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2340, 0],
+      "continueOnFail": true,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SCRAPER_SERVICE_URL }}/scrape",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-scraper-secret", "value": "={{ $env.SCRAPER_SERVICE_SECRET }}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { url: $json.url, title: $json.title } }}",
+        "options": {
+          "timeout": 25000
+        }
+      }
+    },
+    {
+      "id": "build-claude-synthesis-request",
+      "name": "Build Claude Synthesis Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $('Parse SerpAPI Results').first().json;\nconst scraped = $input.all().map((item) => item.json).filter((s) => s && s.success && s.text);\n\nconst searchSnippets = (lead.searchResults || [])\n  .map((r, i) => `${i + 1}. ${r.title}\\n   ${r.link}\\n   \"${r.snippet}\"`)\n  .join(\"\\n\\n\") || \"No search results were returned.\";\n\nconst scrapedContent = scraped.length\n  ? scraped\n      .map((s) => `### ${s.title || s.url} (${s.url})\\n${s.text}`)\n      .join(\"\\n\\n---\\n\\n\")\n  : \"\";\n\nconst noScrapedContent = scraped.length === 0;\nconst locationLine = lead.location ? ` in ${lead.location}` : \"\";\n\nconst userPrompt = [\n  `You are preparing call notes for a sales team member about to call a potential customer. Here is what we found about ${lead.businessName}${locationLine}: search result snippets, and full scraped content from their website and other pages where available.`,\n  ``,\n  `SEARCH RESULT SNIPPETS:`,\n  searchSnippets,\n  ``,\n  `SCRAPED PAGE CONTENT:`,\n  noScrapedContent\n    ? `(No pages were flagged as high-value enough to open, or the pages that were flagged failed to load. Work only from the search snippets above, and say plainly that deeper research wasn't available.)`\n    : scrapedContent,\n  ``,\n  `Synthesize this into a natural, readable call-prep note, 2 to 4 paragraphs, plain prose, not a bulleted list. Include: current location, decision maker name(s) if found, years in business if found, an honest assessment of website quality (professional/outdated/nonexistent), any recent news or updates, and any discrepancies between sources, stating which source you lean toward trusting and why. If information isn't found, say so plainly rather than guessing.`,\n].join(\"\\n\");\n\nreturn [{\n  json: {\n    contactId: lead.contactId,\n    businessName: lead.businessName,\n    claudeRequestBody: {\n      model: \"claude-sonnet-5\",\n      max_tokens: 900,\n      messages: [{ role: \"user\", content: userPrompt }],\n    },\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "claude-synthesize-note",
+      "name": "Claude - Synthesize Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2860, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.claudeRequestBody }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "extract-note-text",
+      "name": "Extract Note Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3120, 0],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const lead = $('Build Claude Synthesis Request').first().json;\nconst claudeResponse = $input.first().json;\n\nconst noteText = (claudeResponse.content && claudeResponse.content[0] && claudeResponse.content[0].text && claudeResponse.content[0].text.trim())\n  || \"Automated enrichment failed to produce a note for this lead \\u2014 manual research needed before the call.\";\n\nreturn [{\n  json: {\n    contactId: lead.contactId,\n    noteText,\n  },\n}];\n"
+      }
+    },
+    {
+      "id": "post-note-to-ghl",
+      "name": "Post Note to GHL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3380, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "=https://services.leadconnectorhq.com/contacts/{{ $json.contactId }}/notes",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GHL_LOCATION_API_KEY }}" },
+            { "name": "Version", "value": "2021-07-28" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { body: $json.noteText } }}",
+        "options": {
+          "timeout": 15000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Lead Enrichment Trigger": {
+      "main": [[{ "node": "Gate: Should Enrich?", "type": "main", "index": 0 }]]
+    },
+    "Gate: Should Enrich?": {
+      "main": [[{ "node": "Build Search Query", "type": "main", "index": 0 }]]
+    },
+    "Build Search Query": {
+      "main": [[{ "node": "SerpAPI Search", "type": "main", "index": 0 }]]
+    },
+    "SerpAPI Search": {
+      "main": [[{ "node": "Parse SerpAPI Results", "type": "main", "index": 0 }]]
+    },
+    "Parse SerpAPI Results": {
+      "main": [[{ "node": "Build Claude Filter Request", "type": "main", "index": 0 }]]
+    },
+    "Build Claude Filter Request": {
+      "main": [[{ "node": "Claude - Filter Links", "type": "main", "index": 0 }]]
+    },
+    "Claude - Filter Links": {
+      "main": [[{ "node": "Parse Flagged URLs", "type": "main", "index": 0 }]]
+    },
+    "Parse Flagged URLs": {
+      "main": [[{ "node": "Split Flagged URLs", "type": "main", "index": 0 }]]
+    },
+    "Split Flagged URLs": {
+      "main": [[{ "node": "Scrape Page", "type": "main", "index": 0 }]]
+    },
+    "Scrape Page": {
+      "main": [[{ "node": "Build Claude Synthesis Request", "type": "main", "index": 0 }]]
+    },
+    "Build Claude Synthesis Request": {
+      "main": [[{ "node": "Claude - Synthesize Note", "type": "main", "index": 0 }]]
+    },
+    "Claude - Synthesize Note": {
+      "main": [[{ "node": "Extract Note Text", "type": "main", "index": 0 }]]
+    },
+    "Extract Note Text": {
+      "main": [[{ "node": "Post Note to GHL", "type": "main", "index": 0 }]]
+    }
+  }
+}
