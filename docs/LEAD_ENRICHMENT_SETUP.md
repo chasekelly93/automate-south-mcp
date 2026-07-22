@@ -8,7 +8,7 @@ narrative note to the contact record before anyone calls them.
 
 ```
 GHL (Facebook lead form)
-  -> GHL Workflow: tag gate + Webhook action
+  -> GHL Workflow: If/Else toggle + Add Tag + Custom Webhook action
      -> n8n: Lead Enrichment workflow (n8n/lead-enrichment-workflow.json)
          -> SerpAPI (top 10 results)
          -> Claude Haiku (pick worthwhile links)
@@ -118,42 +118,59 @@ in n8n next.
 
 ## 4. Configure the GHL side
 
-You need two things in GHL: a **tag** that acts as the on/off toggle, and
-a **workflow** that fires the webhook.
+You need two things in GHL: a **tag** (for record-keeping — who got
+researched), and a **workflow** with a branch that decides who actually
+gets enrichment and fires a Custom Webhook with a clean, minimal body.
 
-### 4a. Create the toggle tag
+**Important:** the on/off toggle lives entirely in GHL's own workflow
+branching, not in a field n8n checks. GHL's `{{contact.tags}}` merge tag
+does not reliably serialize into a webhook JSON body — in testing it came
+through as the literal string `"null"` even on a tagged contact. So don't
+rely on passing tags through and having n8n filter on them. Instead, gate
+it upstream: only contacts that pass your If/Else condition ever reach the
+"Add Tag" + Webhook steps, so by the time the webhook fires, enrichment is
+already the correct decision.
 
-Create a tag called `enrich-lead` (Settings -> Tags, or just create it
-inline the first time you use it in a workflow). This tag is the cost
-control — only leads/campaigns you explicitly want researched get tagged,
-so nothing gets enriched by default.
+### 4a. Create the record-keeping tag
+
+Create a tag called `enrich-lead` (Settings -> Tags, or inline the first
+time you use it in a workflow). This gets applied to every contact that
+goes through the enrichment path, purely so you can filter/search GHL
+contacts later to see who was researched — it is not read by n8n.
 
 ### 4b. Build the GHL workflow
 
-1. **Trigger:** Contact Created (or Form Submitted, if you want to scope
-   it to a specific Facebook lead form) — whichever you already use to
-   catch new Facebook leads.
-2. **Condition / If-Else step (optional but recommended):** only proceed
-   down the enrichment path for the shops/campaigns you want — e.g. "if
-   Contact Source = [specific ad campaign]" or "if Pipeline =
-   [specific pipeline]". This is where you decide *which* leads get
-   tagged.
-3. **Add Tag action:** add `enrich-lead` to the contact. (This is what the
-   n8n workflow's gate step checks — no tag, no enrichment, no cost.)
-4. **Webhook action:** POST to the n8n Production URL from step 3.4.
-   Set the request body to this exact JSON shape (map each value from
-   GHL's available merge fields / custom fields for the trigger):
+1. **Trigger:** Contact Created (or Form Submitted, scoped to the specific
+   Facebook lead form) — whichever you use to catch new Facebook leads.
+2. **If/Else condition — this is the actual toggle:** only the branch that
+   matches proceeds to enrichment — e.g. "if Contact Source = [specific ad
+   campaign]" or "if Pipeline = [specific pipeline]". Leads that don't
+   match this condition skip straight past steps 3-4 below — no tag, no
+   webhook, no cost.
+3. **Add Tag action:** add `enrich-lead` to the contact (record-keeping
+   only, see above).
+4. **Custom Webhook action:** POST to the n8n Production URL from step
+   3.4, with a raw JSON body (not "standard data") — this is the **Custom
+   Webhook** action type, not the plain **Webhook** action, since only
+   Custom Webhook lets you fully replace the payload instead of appending
+   to GHL's full contact/form dump:
 
    ```json
    {
      "contactId": "{{contact.id}}",
      "locationId": "{{location.id}}",
      "businessName": "{{contact.company_name}}",
+     "firstName": "{{contact.first_name}}",
+     "lastName": "{{contact.last_name}}",
      "city": "{{contact.city}}",
-     "state": "{{contact.state}}",
-     "tags": "{{contact.tags}}"
+     "state": "{{contact.state}}"
    }
    ```
+
+   `firstName`/`lastName` are new — the workflow uses them to mention who
+   submitted the lead form in the call-prep note (useful context against
+   any decision-maker name it finds online). `tags` was dropped from the
+   body entirely, for the reason above.
 
    **On `businessName`:** Facebook lead forms for auto body shops usually
    don't have a dedicated "business name" question by default. If yours
@@ -164,24 +181,25 @@ so nothing gets enriched by default.
    has nothing to search for and intentionally skips enrichment rather
    than guessing — you'll just get a lead with no note, same as today.
 
-That's the whole toggle: tag the contact, and the webhook fires with tag
-data the n8n workflow checks before spending a cent on search or Claude
-calls.
+That's the whole toggle: the If/Else branch in step 2 decides who gets
+researched; the webhook only ever fires for contacts that already passed
+that decision.
 
 ---
 
 ## 5. Test it end to end
 
 1. In n8n, activate the workflow (toggle **Active** on).
-2. In GHL, create a test contact that matches your trigger, with a real
-   business name/city, then apply the `enrich-lead` tag (or run it through
-   the GHL workflow you built).
+2. In GHL, run a test contact through the full workflow (trigger ->
+   If/Else -> Add Tag -> Custom Webhook), with a real business name/city
+   so there's something to research.
 3. Watch the n8n **Executions** tab — you should see a run complete in
    roughly 20-40 seconds.
 4. Check the contact's Notes in GHL for the call-prep paragraph.
-5. Try a contact **without** the tag — confirm no note gets posted and no
-   execution shows meaningful work past the gate step (cheap to verify
-   you're not burning search/Claude cost on untagged leads).
+5. Try a contact that **doesn't match** the If/Else condition — confirm it
+   never reaches the webhook at all (nothing shows up in n8n's Executions
+   for it), so you're not burning search/Claude cost on leads you didn't
+   opt in.
 
 ---
 
@@ -230,6 +248,6 @@ calls.
   Request" and "Build Claude Synthesis Request" Code nodes. Reference
   copies with commentary live in `n8n/prompts/` for readability — edit
   both in tandem so they don't drift.
-- **Which leads get enriched:** entirely controlled by the `enrich-lead`
-  tag logic in the GHL workflow — no code or redeploy needed to turn it on
+- **Which leads get enriched:** entirely controlled by the If/Else
+  condition in the GHL workflow — no code or redeploy needed to turn it on
   or off for a shop/campaign.

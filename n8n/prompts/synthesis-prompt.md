@@ -14,6 +14,9 @@ You are preparing call notes for a sales team member about to call a
 potential customer. Here is what we found about {{businessName}}
 {{#if location}}in {{location}}{{/if}}: search result snippets, and full
 scraped content from their website and other pages where available.
+{{#if contactName}}
+The lead form was submitted by: {{contactName}}
+{{/if}}
 
 SEARCH RESULT SNIPPETS:
 {{searchSnippets}}
@@ -32,8 +35,9 @@ plain prose, not a bulleted list. Include: current location, decision maker
 name(s) if found, years in business if found, an honest assessment of
 website quality (professional/outdated/nonexistent), any recent news or
 updates, and any discrepancies between sources, stating which source you
-lean toward trusting and why. If information isn't found, say so plainly
-rather than guessing.
+lean toward trusting and why. If the lead form contact name matches or
+differs from any decision maker name found online, note that too. If
+information isn't found, say so plainly rather than guessing.
 ```
 
 ## Notes on the merge fields
@@ -47,6 +51,10 @@ rather than guessing.
   degrades gracefully instead of losing the source entirely.
 - `noScrapedContent` is set when zero pages were flagged or all scrapes
   failed — this keeps Claude from inventing detail it doesn't have.
+- `contactName` — first + last name of whoever submitted the GHL lead
+  form, when the GHL workflow's webhook body includes `firstName`/
+  `lastName`. Optional; the line is omitted from the prompt entirely if
+  absent.
 
 ## Expected output
 
