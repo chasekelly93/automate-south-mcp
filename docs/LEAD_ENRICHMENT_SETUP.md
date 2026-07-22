@@ -10,7 +10,9 @@ narrative note to the contact record before anyone calls them.
 GHL (Facebook lead form)
   -> GHL Workflow: If/Else toggle + Add Tag + Custom Webhook action
      -> n8n: Lead Enrichment workflow (n8n/lead-enrichment-workflow.json)
-         -> SerpAPI (top 10 results)
+         -> SerpAPI: google engine (top 10 organic results)
+         -> SerpAPI: google_local engine (structured business listing -
+            rating, review count, address, website, if Google has one)
          -> Claude Haiku (pick worthwhile links)
          -> scraper-service (this repo, Playwright) - only flagged links
          -> Claude Sonnet (synthesize call-prep note)
@@ -207,11 +209,12 @@ that decision.
 
 | Step | Cost |
 |---|---|
-| SerpAPI search | ~$0.01-0.015 |
+| SerpAPI search (google engine) | ~$0.01-0.015 |
+| SerpAPI local listing (google_local engine) | ~$0.01-0.015 |
 | Claude Haiku (link filter) | ~$0.001-0.003 |
 | Scraping (self-hosted compute, not per-call billed) | ~$0 marginal |
 | Claude Sonnet (synthesis) | ~$0.01-0.03 depending on scraped content volume |
-| **Total** | **~$0.02-0.05/lead**, comfortably under the $0.10 target |
+| **Total** | **~$0.03-0.06/lead**, comfortably under the $0.10 target |
 
 ---
 
